@@ -5,8 +5,8 @@
 package otel
 
 import (
-	"golang.org/x/tools/internal/event/export/metric"
-	"golang.org/x/tools/internal/event/label"
+	"github.com/friedelschoen/morestringer/internal/event/export/metric"
+	"github.com/friedelschoen/morestringer/internal/event/label"
 )
 
 // convertMetric converts internal metric.Data to an OTLP metric.

@@ -7,8 +7,8 @@ package otel
 import (
 	"fmt"
 
-	"golang.org/x/tools/internal/event/keys"
-	"golang.org/x/tools/internal/event/label"
+	"github.com/friedelschoen/morestringer/internal/event/keys"
+	"github.com/friedelschoen/morestringer/internal/event/label"
 )
 
 // labelToAttribute converts a label to an OTLP attribute.

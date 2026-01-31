@@ -7,10 +7,10 @@ package otel
 import (
 	"slices"
 
-	"golang.org/x/tools/internal/event"
-	"golang.org/x/tools/internal/event/core"
-	"golang.org/x/tools/internal/event/export"
-	"golang.org/x/tools/internal/event/keys"
+	"github.com/friedelschoen/morestringer/internal/event"
+	"github.com/friedelschoen/morestringer/internal/event/core"
+	"github.com/friedelschoen/morestringer/internal/event/export"
+	"github.com/friedelschoen/morestringer/internal/event/keys"
 )
 
 // exportTraces sends traces to the OTLP endpoint.

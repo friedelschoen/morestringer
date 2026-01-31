@@ -10,7 +10,7 @@ import (
 	"iter"
 	"time"
 
-	"golang.org/x/tools/internal/event/label"
+	"github.com/friedelschoen/morestringer/internal/event/label"
 )
 
 // Event holds the information about an event of note that occurred.

@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/friedelschoen/morestringer/internal/gocommand"
 	"golang.org/x/mod/modfile"
-	"golang.org/x/tools/internal/gocommand"
 )
 
 // packageMainIsDevel reports whether the module containing package main

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"golang.org/x/tools/internal/diff/lcs"
+	"github.com/friedelschoen/morestringer/internal/diff/lcs"
 )
 
 // Lines computes differences between two strings. All edits are at line boundaries.

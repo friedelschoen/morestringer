@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/friedelschoen/morestringer/internal/gocommand"
+	"github.com/friedelschoen/morestringer/internal/testenv"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/tools/internal/gocommand"
-	"golang.org/x/tools/internal/testenv"
 )
 
 func TestGoVersion(t *testing.T) {

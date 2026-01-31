@@ -16,8 +16,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"golang.org/x/tools/internal/diffp"
-	"golang.org/x/tools/internal/testenv"
+	"github.com/friedelschoen/morestringer/internal/diffp"
+	"github.com/friedelschoen/morestringer/internal/testenv"
 	"golang.org/x/tools/txtar"
 )
 
