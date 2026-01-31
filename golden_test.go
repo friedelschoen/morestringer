@@ -1002,7 +1002,7 @@ func TestGolden(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			pkgs := loadPackages([]string{absFile}, nil, test.trimPrefix, test.lineComment, t.Logf)
+			pkgs := loadPackages([]string{absFile}, nil, test.trimPrefix, test.lineComment, false, t.Logf)
 			if len(pkgs) != 1 {
 				t.Fatalf("got %d parsed packages but expected 1", len(pkgs))
 			}

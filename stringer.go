@@ -100,6 +100,7 @@ var (
 	trimprefix  = flag.String("trimprefix", "", "trim the `prefix` from the generated constant names")
 	linecomment = flag.Bool("linecomment", false, "use line comment text as printed text when present")
 	buildTags   = flag.String("tags", "", "comma-separated list of build tags to apply")
+	cNames      = flag.Bool("cnames", false, "constant is defined as C.*, use the C-name")
 )
 
 // Usage is a replacement usage function for the flags package.
@@ -158,7 +159,7 @@ func main() {
 	// from which they were generated.
 	//
 	// Types will be excluded when generated, to avoid repetitions.
-	pkgs := loadPackages(args, tags, *trimprefix, *linecomment, nil /* logf */)
+	pkgs := loadPackages(args, tags, *trimprefix, *linecomment, *cNames, nil /* logf */)
 	sort.Slice(pkgs, func(i, j int) bool {
 		// Put x_test packages last.
 		iTest := strings.HasSuffix(pkgs[i].name, "_test")
@@ -265,6 +266,7 @@ type File struct {
 
 	trimPrefix  string
 	lineComment bool
+	cNames      bool
 }
 
 type Package struct {
@@ -282,7 +284,7 @@ type Package struct {
 // logf is a test logging hook. It can be nil when not testing.
 func loadPackages(
 	patterns, tags []string,
-	trimPrefix string, lineComment bool,
+	trimPrefix string, lineComment, cNames bool,
 	logf func(format string, args ...any),
 ) []*Package {
 	cfg := &packages.Config{
@@ -315,6 +317,7 @@ func loadPackages(
 
 				trimPrefix:  trimPrefix,
 				lineComment: lineComment,
+				cNames:      cNames,
 			}
 		}
 
@@ -458,6 +461,32 @@ func (b byValue) Less(i, j int) bool {
 	return b[i].value < b[j].value
 }
 
+func unwrapParen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+func getCName(expr ast.Expr) string {
+	astValue := unwrapParen(expr)
+	if astValue == nil {
+		return ""
+	}
+	ident, ok := astValue.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	name, ok := strings.CutPrefix(ident.Name, "_Ciconst_")
+	if !ok {
+		return ""
+	}
+	return name
+}
+
 // genDecl processes one declaration clause.
 func (f *File) genDecl(node ast.Node) bool {
 	decl, ok := node.(*ast.GenDecl)
@@ -509,7 +538,7 @@ func (f *File) genDecl(node ast.Node) bool {
 		// We now have a list of names (from one line of source code) all being
 		// declared with the desired type.
 		// Grab their names and actual values and store them in f.values.
-		for _, name := range vspec.Names {
+		for ni, name := range vspec.Names {
 			if name.Name == "_" {
 				continue
 			}
@@ -536,6 +565,10 @@ func (f *File) genDecl(node ast.Node) bool {
 			if !isInt {
 				u64 = uint64(i64)
 			}
+			cName := ""
+			if f.cNames {
+				cName = getCName(vspec.Values[ni])
+			}
 			v := Value{
 				originalName: name.Name,
 				value:        u64,
@@ -544,6 +577,8 @@ func (f *File) genDecl(node ast.Node) bool {
 			}
 			if c := vspec.Comment; f.lineComment && c != nil && len(c.List) == 1 {
 				v.name = strings.TrimSpace(c.Text())
+			} else if cName != "" {
+				v.name = strings.TrimPrefix(cName, f.trimPrefix)
 			} else {
 				v.name = strings.TrimPrefix(v.originalName, f.trimPrefix)
 			}
