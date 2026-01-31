@@ -74,7 +74,7 @@
 // The -trimprefix flag specifies a prefix to remove from the constant names
 // when generating the string representations. For instance, -trimprefix=Pill
 // would be an alternative way to ensure that PillAspirin.String() == "Aspirin".
-package main // import "golang.org/x/tools/cmd/stringer"
+package main
 
 import (
 	"bytes"
@@ -101,15 +101,16 @@ var (
 	linecomment = flag.Bool("linecomment", false, "use line comment text as printed text when present")
 	buildTags   = flag.String("tags", "", "comma-separated list of build tags to apply")
 	cNames      = flag.Bool("cnames", false, "constant is defined as C.*, use the C-name")
+	genLookup   = flag.String("lookup", "", "generate a lookup `function`, \"{}\" is replaced with type")
 )
 
 // Usage is a replacement usage function for the flags package.
 func Usage() {
-	fmt.Fprintf(os.Stderr, "Usage of stringer:\n")
-	fmt.Fprintf(os.Stderr, "\tstringer [flags] -type T [directory]\n")
-	fmt.Fprintf(os.Stderr, "\tstringer [flags] -type T files... # Must be a single package\n")
+	fmt.Fprintf(os.Stderr, "Usage of morestringer:\n")
+	fmt.Fprintf(os.Stderr, "\tmorestringer [flags] -type T [directory]\n")
+	fmt.Fprintf(os.Stderr, "\tmorestringer [flags] -type T files... # Must be a single package\n")
 	fmt.Fprintf(os.Stderr, "For more information, see:\n")
-	fmt.Fprintf(os.Stderr, "\thttps://pkg.go.dev/golang.org/x/tools/cmd/stringer\n")
+	fmt.Fprintf(os.Stderr, "\thttps://github.com/friedelschoen/morestringer\n")
 	fmt.Fprintf(os.Stderr, "Flags:\n")
 	flag.PrintDefaults()
 }
@@ -172,7 +173,8 @@ func main() {
 	})
 	for _, pkg := range pkgs {
 		g := Generator{
-			pkg: pkg,
+			pkg:    pkg,
+			lookup: *genLookup,
 		}
 
 		// Print the header and package clause.
@@ -249,7 +251,8 @@ type Generator struct {
 	buf bytes.Buffer // Accumulated output.
 	pkg *Package     // Package we are scanning.
 
-	logf func(format string, args ...any) // test logging hook; nil when not testing
+	logf   func(format string, args ...any) // test logging hook; nil when not testing
+	lookup string
 }
 
 func (g *Generator) Printf(format string, args ...any) {
@@ -361,6 +364,9 @@ func (g *Generator) generate(typeName string, values []Value) {
 		g.Printf("\t_ = x[%s - %s]\n", v.originalName, v.str)
 	}
 	g.Printf("}\n")
+	if g.lookup != "" {
+		g.buildLookup(typeName, values)
+	}
 	runs := splitIntoRuns(values)
 	// The decision of which pattern to use depends on the number of
 	// runs in the numbers. If there's only one, it's easy. For more than
@@ -738,6 +744,69 @@ func (g *Generator) buildMap(runs [][]Value, typeName string) {
 	}
 	g.Printf("}\n\n")
 	g.Printf(stringMap, typeName)
+}
+
+func fnv1a32(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func (g *Generator) buildLookup(typeName string, values []Value) {
+	g.Printf("\n")
+
+	funcName := strings.Replace(g.lookup, "{}", typeName, 1)
+	g.Printf("func %s(name string) (%s, bool) {\n", funcName, typeName)
+	g.Printf("\t//fnv1a32 hash\n")
+	g.Printf("\tvar h uint32 = 2166136261\n")
+	g.Printf("\tfor i := 0; i < len(name); i++ {\n")
+	g.Printf("\t\th ^= uint32(name[i])\n")
+	g.Printf("\t\th *= 16777619\n")
+	g.Printf("\t}\n")
+	g.Printf("\n")
+	g.Printf("\tswitch h {\n")
+
+	// group by hash
+	type entry struct {
+		hash uint32
+		name string
+		val  string
+	}
+	ents := make([]entry, len(values))
+	for i, v := range values {
+		ents[i] = entry{
+			hash: fnv1a32(v.name),
+			name: v.name,
+			val:  v.originalName,
+		}
+	}
+
+	sort.Slice(ents, func(i, j int) bool {
+		if ents[i].hash != ents[j].hash {
+			return ents[i].hash < ents[j].hash
+		}
+		return ents[i].name < ents[j].name
+	})
+
+	// emit switch cases, handling collisions
+	prev := uint32(0xffffffff)
+	for _, ent := range ents {
+		h := ent.hash
+		if h != prev {
+			g.Printf("\tcase 0x%08x:\n", h)
+			prev = h
+		}
+		g.Printf("\t\tif name == %q {\n", ent.name)
+		g.Printf("\t\t\treturn %s, true\n", ent.val)
+		g.Printf("\t\t}\n")
+	}
+
+	g.Printf("\t}\n")
+	g.Printf("\treturn 0, false\n")
+	g.Printf("}\n")
 }
 
 // Argument to format is the type name.
