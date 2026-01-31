@@ -51,7 +51,7 @@ func (Pill) String() string
 
 That method will translate the value of a Pill constant to the string representation
 of the respective constant name, so that the call `fmt.Print(painkiller.Aspirin)` will
-print the string "Aspirin".
+print the string `"Aspirin"`.
 
 Typically this process would be run using go generate, like this:
 
@@ -123,11 +123,17 @@ const (
 )
 ```
 
-As those constants often are more known, morestringer adds option `-cname` which assigns the C-name to
-the constant rather than the constants name. `-linecomment` does override this option!
+As those constants often are more known, morestringer adds option `-cnames` which assigns the C-name to
+the constant rather than the constants name. `-linecomment` does override this option! Enabled the code produces:
+`KeyQ.String() == "KEY_Q"`.
 
 As an extension morestringer can generate lookup functions that take the constant name and returns the corresponding value if exists.
 To generate such function, use `-lookup name`. `name` is the function name where `{}` is replaced with the actual type.
+Generating a lookup using `-lookup {}ByName` enables following function:
+
+```go
+func KeyByName(name string) (Key, bool)
+```
 
 # Licensing
 
