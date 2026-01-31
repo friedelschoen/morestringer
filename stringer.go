@@ -365,7 +365,14 @@ func (g *Generator) generate(typeName string, values []Value) {
 	}
 	g.Printf("}\n")
 	if g.lookup != "" {
-		g.buildLookup(typeName, values)
+		// For each value, you'll get 4 lines of source-code. This
+		// might overfloat the resulting file and we're choosing to
+		// generate a less verbose technique.
+		if len(values) <= 200 {
+			g.buildLookup(typeName, values)
+		} else {
+			g.buildLookupMap(typeName, values)
+		}
 	}
 	runs := splitIntoRuns(values)
 	// The decision of which pattern to use depends on the number of
@@ -806,6 +813,22 @@ func (g *Generator) buildLookup(typeName string, values []Value) {
 
 	g.Printf("\t}\n")
 	g.Printf("\treturn 0, false\n")
+	g.Printf("}\n")
+}
+
+func (g *Generator) buildLookupMap(typeName string, values []Value) {
+	g.Printf("\n")
+
+	g.Printf("var _%s_lookup = map[string]%s{\n", typeName, typeName)
+	for _, v := range values {
+		g.Printf("\t%q: %s,\n", v.name, v.originalName)
+	}
+	g.Printf("}\n")
+
+	funcName := strings.Replace(g.lookup, "{}", typeName, 1)
+	g.Printf("func %s(name string) (%s, bool) {\n", funcName, typeName)
+	g.Printf("\tvalue, ok := _%s_lookup[name]\n", typeName)
+	g.Printf("\treturn value, ok\n")
 	g.Printf("}\n")
 }
 
