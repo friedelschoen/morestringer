@@ -296,10 +296,13 @@ func (g *Generator) generate(typeName string, values []Value) {
 		// For each value, you'll get 4 lines of source-code. This
 		// might overfloat the resulting file and we're choosing to
 		// generate a less verbose technique.
-		if len(values) <= 500 {
-			g.buildLookup(typeName, values)
-		} else {
-			g.buildLookupMap(typeName, values)
+		switch n := len(values); {
+		case n <= 500:
+			g.buildLookup(typeName, values) // fnv32 hash-switch
+		case n <= 5000:
+			g.buildLookupBinary(typeName, values) // binary search op gesorteerde namen
+		default:
+			g.buildLookupMap(typeName, values) // map
 		}
 	}
 	runs := splitIntoRuns(values)
@@ -753,6 +756,57 @@ func (g *Generator) buildLookup(typeName string, values []Value) {
 		g.Printf("\t\t}\n")
 	}
 
+	g.Printf("\t}\n")
+	g.Printf("\treturn 0, false\n")
+	g.Printf("}\n")
+}
+
+func (g *Generator) buildLookupBinary(typeName string, values []Value) {
+	g.Printf("\n")
+
+	// Kopieer en sorteer op de uiteindelijke naam (dus v.name).
+	vs := append([]Value(nil), values...)
+	sort.Slice(vs, func(i, j int) bool {
+		if vs[i].name != vs[j].name {
+			return vs[i].name < vs[j].name
+		}
+		// Stabieler/debugvriendelijker bij gelijke namen.
+		return vs[i].originalName < vs[j].originalName
+	})
+
+	// Hergebruik bestaande compacte concat-string + index array generator.
+	// Dit genereert:
+	//   const _<T>_name_lookup = "..."
+	//   var   _<T>_index_lookup = [...]uintN{...}
+	indexDecl, nameDecl := g.createIndexAndNameDecl(vs, typeName, "_lookup")
+	g.Printf("const %s\n", nameDecl)
+	g.Printf("var %s\n", indexDecl)
+
+	// Waarden in exact dezelfde volgorde als de gesorteerde namen.
+	g.Printf("var _%s_value_lookup = [...]%s{\n", typeName, typeName)
+	for _, v := range vs {
+		g.Printf("\t%s,\n", v.originalName)
+	}
+	g.Printf("}\n\n")
+
+	funcName := strings.Replace(g.lookup, "{}", typeName, 1)
+	g.Printf("func %s(name string) (%s, bool) {\n", funcName, typeName)
+
+	// hi is len(value_lookup); index array heeft len+1, maar die gebruiken we via mid+1.
+	g.Printf("\tlo, hi := 0, len(_%s_value_lookup)\n", typeName)
+	g.Printf("\tfor lo < hi {\n")
+	g.Printf("\t\tmid := int(uint(lo+hi) >> 1)\n")
+	g.Printf("\t\ts := _%s_name_lookup[_%s_index_lookup[mid]:_%s_index_lookup[mid+1]]\n",
+		typeName, typeName, typeName)
+
+	g.Printf("\t\tif name == s {\n")
+	g.Printf("\t\t\treturn _%s_value_lookup[mid], true\n", typeName)
+	g.Printf("\t\t}\n")
+	g.Printf("\t\tif name < s {\n")
+	g.Printf("\t\t\thi = mid\n")
+	g.Printf("\t\t} else {\n")
+	g.Printf("\t\t\tlo = mid + 1\n")
+	g.Printf("\t\t}\n")
 	g.Printf("\t}\n")
 	g.Printf("\treturn 0, false\n")
 	g.Printf("}\n")
