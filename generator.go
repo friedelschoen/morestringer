@@ -56,6 +56,15 @@ func splitIntoRuns(values []Value) [][]Value {
 	return runs
 }
 
+func fnv1a32(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
 // Generator holds the state of the analysis. Primarily used to buffer
 // the output for format.Source.
 type Generator struct {
@@ -68,53 +77,6 @@ type Generator struct {
 
 func (g *Generator) Printf(format string, args ...any) {
 	fmt.Fprintf(&g.buf, format, args...)
-}
-
-// generate produces the String method for the named type.
-func (g *Generator) generate(typeName string, values []Value) {
-	// Generate code that will fail if the constants change value.
-	g.Printf("func _() {\n")
-	g.Printf("\t// An \"invalid array index\" compiler error signifies that the constant values have changed.\n")
-	g.Printf("\t// Re-run the stringer command to generate them again.\n")
-	g.Printf("\tvar x [1]struct{}\n")
-	for _, v := range values {
-		g.Printf("\t_ = x[%s - %s]\n", v.originalName, v.str)
-	}
-	g.Printf("}\n")
-	if g.lookup != "" {
-		// For each value, you'll get 4 lines of source-code. This
-		// might overfloat the resulting file and we're choosing to
-		// generate a less verbose technique.
-		switch n := len(values); {
-		case n <= 500:
-			g.buildLookup(typeName, values) // fnv32 hash-switch
-		case n <= 5000:
-			g.buildLookupBinary(typeName, values) // binary search op gesorteerde namen
-		default:
-			g.buildLookupMap(typeName, values) // map
-		}
-	}
-	runs := splitIntoRuns(values)
-	// The decision of which pattern to use depends on the number of
-	// runs in the numbers. If there's only one, it's easy. For more than
-	// one, there's a tradeoff between complexity and size of the data
-	// and code vs. the simplicity of a map. A map takes more space,
-	// but so does the code. The decision here (crossover at 10) is
-	// arbitrary, but considers that for large numbers of runs the cost
-	// of the linear scan in the switch might become important, and
-	// rather than use yet another algorithm such as binary search,
-	// we punt and use a map. In any case, the likelihood of a map
-	// being necessary for any realistic example other than bitmasks
-	// is very low. And bitmasks probably deserve their own analysis,
-	// to be done some other day.
-	switch {
-	case len(runs) == 1:
-		g.buildOneRun(runs, typeName)
-	case len(runs) <= 10:
-		g.buildMultipleRuns(runs, typeName)
-	default:
-		g.buildMap(runs, typeName)
-	}
 }
 
 // format returns the gofmt-ed contents of the Generator's buffer.
@@ -143,14 +105,14 @@ func (g *Generator) declareIndexAndNameVars(runs [][]Value, typeName string) {
 	}
 	g.Printf("const (\n")
 	for _, name := range names {
-		g.Printf("\t%s\n", name)
+		g.Printf("%s\n", name)
 	}
 	g.Printf(")\n\n")
 
 	if len(indexes) > 0 {
 		g.Printf("var (")
 		for _, index := range indexes {
-			g.Printf("\t%s\n", index)
+			g.Printf("%s\n", index)
 		}
 		g.Printf(")\n\n")
 	}
@@ -196,6 +158,58 @@ func (g *Generator) declareNameVars(runs [][]Value, typeName string, suffix stri
 	g.Printf("\"\n")
 }
 
+// generate produces the String method for the named type.
+func (g *Generator) generate(typeName string, values []Value) {
+	g.buildCheck(values)
+	if g.lookup != "" {
+		// For each value, you'll get 4 lines of source-code. This
+		// might overfloat the resulting file and we're choosing to
+		// generate a less verbose technique.
+		switch n := len(values); {
+		case n <= 500:
+			g.buildLookup(typeName, values) // fnv32 hash-switch
+		case n <= 5000:
+			g.buildLookupBinary(typeName, values) // binary search op gesorteerde namen
+		default:
+			g.buildLookupMap(typeName, values) // map
+		}
+	}
+	runs := splitIntoRuns(values)
+
+	// The decision of which pattern to use depends on the number of
+	// runs in the numbers. If there's only one, it's easy. For more than
+	// one, there's a tradeoff between complexity and size of the data
+	// and code vs. the simplicity of a map. A map takes more space,
+	// but so does the code. The decision here (crossover at 10) is
+	// arbitrary, but considers that for large numbers of runs the cost
+	// of the linear scan in the switch might become important, and
+	// rather than use yet another algorithm such as binary search,
+	// we punt and use a map. In any case, the likelihood of a map
+	// being necessary for any realistic example other than bitmasks
+	// is very low. And bitmasks probably deserve their own analysis,
+	// to be done some other day.
+	switch {
+	case len(runs) == 1:
+		g.buildOneRun(runs, typeName)
+	case len(runs) <= 10:
+		g.buildMultipleRuns(runs, typeName)
+	default:
+		g.buildMap(runs, typeName)
+	}
+}
+
+func (g *Generator) buildCheck(values []Value) {
+	// Generate code that will fail if the constants change value.
+	g.Printf("func _() {\n")
+	g.Printf("// An \"invalid array index\" compiler error signifies that the constant values have changed.\n")
+	g.Printf("// Re-run the stringer command to generate them again.\n")
+	g.Printf("var x [1]struct{}\n")
+	for _, v := range values {
+		g.Printf("_ = x[%s - %s]\n", v.originalName, v.str)
+	}
+	g.Printf("}\n")
+}
+
 // buildOneRun generates the variables and String method for a single run of contiguous values.
 func (g *Generator) buildOneRun(runs [][]Value, typeName string) {
 	values := runs[0]
@@ -223,28 +237,28 @@ func (g *Generator) buildMultipleRuns(runs [][]Value, typeName string) {
 	g.Printf("\n")
 	g.declareIndexAndNameVars(runs, typeName)
 	g.Printf("func (i %s) String() string {\n", typeName)
-	g.Printf("\tswitch {\n")
+	g.Printf("switch {\n")
 	for i, values := range runs {
 		if len(values) == 1 {
-			g.Printf("\tcase i == %s:\n", &values[0])
-			g.Printf("\t\treturn _%s_name_%d\n", typeName, i)
+			g.Printf("case i == %s:\n", &values[0])
+			g.Printf("return _%s_name_%d\n", typeName, i)
 			continue
 		}
 		if values[0].value == 0 && !values[0].signed {
 			// For an unsigned lower bound of 0, "0 <= i" would be redundant.
-			g.Printf("\tcase i <= %s:\n", &values[len(values)-1])
+			g.Printf("case i <= %s:\n", &values[len(values)-1])
 		} else {
-			g.Printf("\tcase %s <= i && i <= %s:\n", &values[0], &values[len(values)-1])
+			g.Printf("case %s <= i && i <= %s:\n", &values[0], &values[len(values)-1])
 		}
 		if values[0].value != 0 {
-			g.Printf("\t\ti -= %s\n", &values[0])
+			g.Printf("i -= %s\n", &values[0])
 		}
-		g.Printf("\t\treturn _%s_name_%d[_%s_index_%d[i]:_%s_index_%d[i+1]]\n",
+		g.Printf("return _%s_name_%d[_%s_index_%d[i]:_%s_index_%d[i+1]]\n",
 			typeName, i, typeName, i, typeName, i)
 	}
-	g.Printf("\tdefault:\n")
-	g.Printf("\t\treturn \"%s(\" + strconv.FormatInt(int64(i), 10) + \")\"\n", typeName)
-	g.Printf("\t}\n")
+	g.Printf("default:\n")
+	g.Printf("return \"%s(\" + strconv.FormatInt(int64(i), 10) + \")\"\n", typeName)
+	g.Printf("}\n")
 	g.Printf("}\n")
 }
 
@@ -257,7 +271,7 @@ func (g *Generator) buildMap(runs [][]Value, typeName string) {
 	n := 0
 	for _, values := range runs {
 		for _, value := range values {
-			g.Printf("\t%s: _%s_name[%d:%d],\n", &value, typeName, n, n+len(value.name))
+			g.Printf("%s: _%s_name[%d:%d],\n", &value, typeName, n, n+len(value.name))
 			n += len(value.name)
 		}
 	}
@@ -265,28 +279,19 @@ func (g *Generator) buildMap(runs [][]Value, typeName string) {
 	g.Printf(stringMap, typeName)
 }
 
-func fnv1a32(s string) uint32 {
-	var h uint32 = 2166136261
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	return h
-}
-
 func (g *Generator) buildLookup(typeName string, values []Value) {
 	g.Printf("\n")
 
 	funcName := strings.Replace(g.lookup, "{}", typeName, 1)
 	g.Printf("func %s(name string) (%s, bool) {\n", funcName, typeName)
-	g.Printf("\t//fnv1a32 hash\n")
-	g.Printf("\tvar h uint32 = 2166136261\n")
-	g.Printf("\tfor i := 0; i < len(name); i++ {\n")
-	g.Printf("\t\th ^= uint32(name[i])\n")
-	g.Printf("\t\th *= 16777619\n")
-	g.Printf("\t}\n")
+	g.Printf("//fnv1a32 hash\n")
+	g.Printf("var h uint32 = 2166136261\n")
+	g.Printf("for i := 0; i < len(name); i++ {\n")
+	g.Printf("h ^= uint32(name[i])\n")
+	g.Printf("h *= 16777619\n")
+	g.Printf("}\n")
 	g.Printf("\n")
-	g.Printf("\tswitch h {\n")
+	g.Printf("switch h {\n")
 
 	// group by hash
 	type entry struct {
@@ -315,16 +320,16 @@ func (g *Generator) buildLookup(typeName string, values []Value) {
 	for _, ent := range ents {
 		h := ent.hash
 		if h != prev {
-			g.Printf("\tcase 0x%08x:\n", h)
+			g.Printf("case 0x%08x:\n", h)
 			prev = h
 		}
-		g.Printf("\t\tif name == %q {\n", ent.name)
-		g.Printf("\t\t\treturn %s, true\n", ent.val)
-		g.Printf("\t\t}\n")
+		g.Printf("if name == %q {\n", ent.name)
+		g.Printf("return %s, true\n", ent.val)
+		g.Printf("}\n")
 	}
 
-	g.Printf("\t}\n")
-	g.Printf("\treturn 0, false\n")
+	g.Printf("}\n")
+	g.Printf("return 0, false\n")
 	g.Printf("}\n")
 }
 
@@ -352,7 +357,7 @@ func (g *Generator) buildLookupBinary(typeName string, values []Value) {
 	// Waarden in exact dezelfde volgorde als de gesorteerde namen.
 	g.Printf("var _%s_value_lookup = [...]%s{\n", typeName, typeName)
 	for _, v := range vs {
-		g.Printf("\t%s,\n", v.originalName)
+		g.Printf("%s,\n", v.originalName)
 	}
 	g.Printf("}\n\n")
 
@@ -360,22 +365,22 @@ func (g *Generator) buildLookupBinary(typeName string, values []Value) {
 	g.Printf("func %s(name string) (%s, bool) {\n", funcName, typeName)
 
 	// hi is len(value_lookup); index array heeft len+1, maar die gebruiken we via mid+1.
-	g.Printf("\tlo, hi := 0, len(_%s_value_lookup)\n", typeName)
-	g.Printf("\tfor lo < hi {\n")
-	g.Printf("\t\tmid := int(uint(lo+hi) >> 1)\n")
-	g.Printf("\t\ts := _%s_name_lookup[_%s_index_lookup[mid]:_%s_index_lookup[mid+1]]\n",
+	g.Printf("lo, hi := 0, len(_%s_value_lookup)\n", typeName)
+	g.Printf("for lo < hi {\n")
+	g.Printf("mid := int(uint(lo+hi) >> 1)\n")
+	g.Printf("s := _%s_name_lookup[_%s_index_lookup[mid]:_%s_index_lookup[mid+1]]\n",
 		typeName, typeName, typeName)
 
-	g.Printf("\t\tif name == s {\n")
-	g.Printf("\t\t\treturn _%s_value_lookup[mid], true\n", typeName)
-	g.Printf("\t\t}\n")
-	g.Printf("\t\tif name < s {\n")
-	g.Printf("\t\t\thi = mid\n")
-	g.Printf("\t\t} else {\n")
-	g.Printf("\t\t\tlo = mid + 1\n")
-	g.Printf("\t\t}\n")
-	g.Printf("\t}\n")
-	g.Printf("\treturn 0, false\n")
+	g.Printf("if name == s {\n")
+	g.Printf("return _%s_value_lookup[mid], true\n", typeName)
+	g.Printf("}\n")
+	g.Printf("if name < s {\n")
+	g.Printf("hi = mid\n")
+	g.Printf("} else {\n")
+	g.Printf("lo = mid + 1\n")
+	g.Printf("}\n")
+	g.Printf("}\n")
+	g.Printf("return 0, false\n")
 	g.Printf("}\n")
 }
 
@@ -384,14 +389,14 @@ func (g *Generator) buildLookupMap(typeName string, values []Value) {
 
 	g.Printf("var _%s_lookup = map[string]%s{\n", typeName, typeName)
 	for _, v := range values {
-		g.Printf("\t%q: %s,\n", v.name, v.originalName)
+		g.Printf("%q: %s,\n", v.name, v.originalName)
 	}
 	g.Printf("}\n")
 
 	funcName := strings.Replace(g.lookup, "{}", typeName, 1)
 	g.Printf("func %s(name string) (%s, bool) {\n", funcName, typeName)
-	g.Printf("\tvalue, ok := _%s_lookup[name]\n", typeName)
-	g.Printf("\treturn value, ok\n")
+	g.Printf("value, ok := _%s_lookup[name]\n", typeName)
+	g.Printf("return value, ok\n")
 	g.Printf("}\n")
 }
 
