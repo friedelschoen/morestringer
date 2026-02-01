@@ -34,7 +34,9 @@ func expectFooString(pkg string) []byte {
 
 package %s
 
-import "strconv"
+import (
+	"strconv"
+)
 
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -279,7 +281,9 @@ const bazX Baz = 1
 
 package main
 
-import "strconv"
+import (
+	"strconv"
+)
 
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -305,7 +309,9 @@ func (i Foo) String() string {
 
 package main
 
-import "strconv"
+import (
+	"strconv"
+)
 
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -331,7 +337,9 @@ func (i Bar) String() string {
 
 package main_test
 
-import "strconv"
+import (
+	"strconv"
+)
 
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
