@@ -239,7 +239,7 @@ func (g *Generator) genType(typeName string, values []Value) {
 		case n <= 500:
 			g.buildLookup(typeName, values) // fnv32 hash-switch
 		case n <= 5000:
-			g.buildLookupBinary(typeName, values) // binary search op gesorteerde namen
+			g.buildLookupBinary(typeName, values) // binary search
 		default:
 			g.buildLookupMap(typeName, values) // map
 		}
@@ -419,8 +419,7 @@ func (g *Generator) buildLookupBinary(typeName string, values []Value) {
 	g.Printf("\n")
 
 	// copy values
-	vs := slices.Clone(values)
-	slices.SortFunc(vs, func(left, right Value) int {
+	slices.SortFunc(values, func(left, right Value) int {
 		if left.repr != right.repr {
 			return strings.Compare(left.repr, right.repr)
 		}
@@ -429,12 +428,12 @@ func (g *Generator) buildLookupBinary(typeName string, values []Value) {
 
 	//   const _<T>_name_lookup = "..."
 	//   var   _<T>_index_lookup = [...]uintN{...}
-	indexDecl, nameDecl := g.createIndexAndNameDecl(vs, typeName, "_lookup")
+	indexDecl, nameDecl := g.createIndexAndNameDecl(values, typeName, "_lookup")
 	g.Printf("const %s\n", nameDecl)
 	g.Printf("var %s\n", indexDecl)
 
 	g.Printf("var _%s_value_lookup = [...]%s{\n", typeName, typeName)
-	for _, v := range vs {
+	for _, v := range values {
 		g.Printf("%s,\n", v.original)
 	}
 	g.Printf("}\n\n")
@@ -492,13 +491,13 @@ func (g *Generator) buildJson(typeName string) {
 	g.Printf("case string:\n")
 	g.Printf("m, ok := %s(v)\n", lookupFunc)
 	g.Printf("if !ok {\n")
-	g.Printf("return &json.UnmarshalTypeError{Value: string(b), Type: reflect.TypeFor[%s]()}\n", typeName)
+	g.Printf("return &json.UnmarshalTypeError{Value: string(b), Type: reflect.TypeOf(%s(0))}\n", typeName)
 	g.Printf("}\n")
 	g.Printf("*i = m\n")
 	g.Printf("case float64:\n")
 	g.Printf("*i = %s(v)\n", typeName)
 	g.Printf("default:\n")
-	g.Printf("return &json.UnmarshalTypeError{Value: string(b), Type: reflect.TypeFor[%s]()}\n", typeName)
+	g.Printf("return &json.UnmarshalTypeError{Value: string(b), Type: reflect.TypeOf(%s(0))}\n", typeName)
 	g.Printf("}\n")
 	g.Printf("return nil\n")
 	g.Printf("}\n")

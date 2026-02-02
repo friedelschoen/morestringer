@@ -5,6 +5,7 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -16,7 +17,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -47,21 +48,15 @@ func isDirectory(name string) bool {
 	return info.IsDir()
 }
 
-// File holds a single parsed file and associated data.
-type File struct {
-	pkg  *Package  // Package to which this file belongs.
-	file *ast.File // Parsed AST.
+type Package struct {
+	name         string
+	defs         map[*ast.Ident]types.Object
+	files        []*ast.File
+	hasTestFiles bool
 
 	trimPrefix  string
 	lineComment bool
 	cNames      bool
-}
-
-type Package struct {
-	name         string
-	defs         map[*ast.Ident]types.Object
-	files        []*File
-	hasTestFiles bool
 }
 
 // loadPackages analyzes the single package constructed from the patterns and tags.
@@ -90,18 +85,11 @@ func loadPackages(patterns, tags []string, trimPrefix string, lineComment, cName
 		p := &Package{
 			name:  pkg.Name,
 			defs:  pkg.TypesInfo.Defs,
-			files: make([]*File, len(pkg.Syntax)),
-		}
+			files: pkg.Syntax,
 
-		for j, file := range pkg.Syntax {
-			p.files[j] = &File{
-				file: file,
-				pkg:  p,
-
-				trimPrefix:  trimPrefix,
-				lineComment: lineComment,
-				cNames:      cNames,
-			}
+			trimPrefix:  trimPrefix,
+			lineComment: lineComment,
+			cNames:      cNames,
 		}
 
 		// Keep track of test files, since we might want to generated
@@ -138,16 +126,12 @@ func memPackage(source string, trimPrefix string, lineComment, cNames bool) *Pac
 	p := &Package{
 		name: pkg.Name(),
 		defs: info.Defs,
-	}
-
-	p.files = []*File{{
-		pkg:  p,
-		file: fileast,
 
 		trimPrefix:  trimPrefix,
 		lineComment: lineComment,
 		cNames:      cNames,
-	}}
+		files:       []*ast.File{fileast},
+	}
 
 	return p
 }
@@ -159,14 +143,14 @@ func (pkg *Package) findValues(typeNames ...string) map[string][]Value {
 	}
 
 	for _, file := range pkg.files {
-		ast.Inspect(file.file, func(node ast.Node) bool {
+		ast.Inspect(file, func(node ast.Node) bool {
 			decl, ok := node.(*ast.GenDecl)
 			if !ok || decl.Tok != token.CONST {
 				// We only care about const declarations.
 				return true
 			}
 
-			file.genDecl(decl, typeValues)
+			pkg.genDecl(decl, typeValues)
 			return false
 		})
 	}
@@ -231,7 +215,7 @@ func valueExpr(vspec *ast.ValueSpec, ni int) ast.Expr {
 	return nil
 }
 
-func (f *File) createValue(name string, cval constant.Value, signed bool, expr ast.Expr, comment *ast.CommentGroup) Value {
+func (pkg *Package) createValue(name string, cval constant.Value, signed bool, expr ast.Expr, comment *ast.CommentGroup) Value {
 	v := Value{
 		original: name,
 		signed:   signed,
@@ -245,18 +229,18 @@ func (f *File) createValue(name string, cval constant.Value, signed bool, expr a
 		log.Fatalf("internal error: value of %s is not an integer: %s", name, cval.String())
 	}
 
-	if f.lineComment && comment != nil && len(comment.List) == 1 {
+	if pkg.lineComment && comment != nil && len(comment.List) == 1 {
 		v.repr = strings.TrimSpace(comment.Text())
-	} else if cName := getCName(expr); f.cNames && cName != "" {
-		v.repr = strings.TrimPrefix(cName, f.trimPrefix)
+	} else if cName := getCName(expr); pkg.cNames && cName != "" {
+		v.repr = strings.TrimPrefix(cName, pkg.trimPrefix)
 	} else {
-		v.repr = strings.TrimPrefix(v.original, f.trimPrefix)
+		v.repr = strings.TrimPrefix(v.original, pkg.trimPrefix)
 	}
 	return v
 }
 
-// genDecl processes one declaration clause.
-func (f *File) genDecl(decl *ast.GenDecl, typeValues map[string][]Value) {
+// genDecl processes one declaration clause, it stores found types in `typeValues` if type exists.
+func (pkg *Package) genDecl(decl *ast.GenDecl, typeValues map[string][]Value) {
 	// The name of the type of the constants we are declaring.
 	// Can change if this is a multi-element declaration.
 	typ := ""
@@ -309,7 +293,7 @@ func (f *File) genDecl(decl *ast.GenDecl, typeValues map[string][]Value) {
 			// This dance lets the type checker find the values for us. It's a
 			// bit tricky: look up the object declared by the name, find its
 			// types.Const, and extract its value.
-			obj, ok := f.pkg.defs[name]
+			obj, ok := pkg.defs[name]
 			if !ok {
 				log.Fatalf("no value for constant %s", name)
 			}
@@ -321,7 +305,7 @@ func (f *File) genDecl(decl *ast.GenDecl, typeValues map[string][]Value) {
 			if value.Kind() != constant.Int {
 				log.Fatalf("can't happen: constant is not an integer %s", name)
 			}
-			values = append(values, f.createValue(name.Name, value, info&types.IsUnsigned == 0, valueExpr(vspec, ni), vspec.Comment))
+			values = append(values, pkg.createValue(name.Name, value, info&types.IsUnsigned == 0, valueExpr(vspec, ni), vspec.Comment))
 		}
 		typeValues[typ] = values
 	}
@@ -386,16 +370,16 @@ func main() {
 	//
 	// Types will be excluded when generated, to avoid repetitions.
 	pkgs := loadPackages(args, tags, *trimprefix, *linecomment, *cNames)
-	sort.Slice(pkgs, func(i, j int) bool {
-		// Put x_test packages last.
-		iTest := strings.HasSuffix(pkgs[i].name, "_test")
-		jTest := strings.HasSuffix(pkgs[j].name, "_test")
+	slices.SortFunc(pkgs, func(left, right *Package) int {
+		iTest := strings.HasSuffix(left.name, "_test")
+		jTest := strings.HasSuffix(right.name, "_test")
 		if iTest != jTest {
-			return !iTest
+			// Put x_test packages last.
+			return +1
 		}
-
-		return len(pkgs[i].files) < len(pkgs[j].files)
+		return cmp.Compare(len(left.files), len(right.files))
 	})
+
 	g := Generator{
 		lookup: *genLookup,
 		json:   *genJson,
