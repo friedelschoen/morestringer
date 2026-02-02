@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/importer"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"log"
@@ -20,133 +22,12 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-// Usage is a replacement usage function for the flags package.
-func Usage() {
-	fmt.Fprintf(os.Stderr, "Usage of morestringer:\n")
-	fmt.Fprintf(os.Stderr, "\tmorestringer [flags] -type T [directory]\n")
-	fmt.Fprintf(os.Stderr, "\tmorestringer [flags] -type T files... # Must be a single package\n")
-	fmt.Fprintf(os.Stderr, "For more information, see:\n")
-	fmt.Fprintf(os.Stderr, "\thttps://github.com/friedelschoen/morestringer\n")
-	fmt.Fprintf(os.Stderr, "Flags:\n")
-	flag.PrintDefaults()
-}
-
-func main() {
-	log.SetFlags(0)
-	log.SetPrefix("stringer: ")
-
-	typeNames := flag.String("type", "", "comma-separated list of type names; must be set")
-	output := flag.String("output", "", "output file name; default srcdir/<type>_string.go")
-	trimprefix := flag.String("trimprefix", "", "trim the `prefix` from the generated constant names")
-	linecomment := flag.Bool("linecomment", false, "use line comment text as printed text when present")
-	buildTags := flag.String("tags", "", "comma-separated list of build tags to apply")
-	cNames := flag.Bool("cnames", false, "constant is defined as C.*, use the C-name")
-	genLookup := flag.String("lookup", "", "generate a lookup `function`, \"{}\" is replaced with type")
-	genJson := flag.Bool("json", false, "generate JSONUnmarshal and JSONMarshal methods")
-
-	flag.Usage = Usage
-	flag.Parse()
-	if len(*typeNames) == 0 {
-		flag.Usage()
-		os.Exit(2)
-	}
-	types := strings.Split(*typeNames, ",")
-	var tags []string
-	if len(*buildTags) > 0 {
-		tags = strings.Split(*buildTags, ",")
-	}
-
-	// We accept either one directory or a list of files. Which do we have?
-	args := flag.Args()
-	if len(args) == 0 {
-		// Default: process whole package in current directory.
-		args = []string{"."}
-	}
-
-	// Parse the package once.
-	var dir string
-	// TODO(suzmue): accept other patterns for packages (directories, list of files, import paths, etc).
-	if len(args) == 1 && isDirectory(args[0]) {
-		dir = args[0]
-	} else {
-		if len(tags) != 0 {
-			log.Fatal("-tags option applies only to directories, not when files are specified")
-		}
-		dir = filepath.Dir(args[0])
-	}
-
-	// For each type, generate code in the first package where the type is declared.
-	// The order of packages is as follows:
-	// package x
-	// package x compiled for tests
-	// package x_test
-	//
-	// Each package pass could result in a separate generated file.
-	// These files must have the same package and test/not-test nature as the types
-	// from which they were generated.
-	//
-	// Types will be excluded when generated, to avoid repetitions.
-	pkgs := loadPackages(args, tags, *trimprefix, *linecomment, *cNames, nil /* logf */)
-	sort.Slice(pkgs, func(i, j int) bool {
-		// Put x_test packages last.
-		iTest := strings.HasSuffix(pkgs[i].name, "_test")
-		jTest := strings.HasSuffix(pkgs[j].name, "_test")
-		if iTest != jTest {
-			return !iTest
-		}
-
-		return len(pkgs[i].files) < len(pkgs[j].files)
-	})
-	for _, pkg := range pkgs {
-		g := Generator{
-			pkg:    pkg,
-			lookup: *genLookup,
-			json:   *genJson,
-		}
-		g.prologue()
-
-		// Run generate for types that can be found. Keep the rest for the remainingTypes iteration.
-		var foundTypes, remainingTypes []string
-		for _, typeName := range types {
-			values := findValues(typeName, pkg)
-			if len(values) > 0 {
-				g.generate(typeName, values)
-				foundTypes = append(foundTypes, typeName)
-			} else {
-				remainingTypes = append(remainingTypes, typeName)
-			}
-		}
-		if len(foundTypes) == 0 {
-			// This package didn't have any of the relevant types, skip writing a file.
-			continue
-		}
-		if len(remainingTypes) > 0 && output != nil && *output != "" {
-			log.Fatalf("cannot write to single file (-output=%q) when matching types are found in multiple packages", *output)
-		}
-		types = remainingTypes
-
-		// Format the output.
-		src := g.format()
-
-		// Write to file.
-		outputName := *output
-		if outputName == "" {
-			// Type names will be unique across packages since only the first
-			// match is picked.
-			// So there won't be collisions between a package compiled for tests
-			// and the separate package of tests (package foo_test).
-			outputName = filepath.Join(dir, baseName(pkg, foundTypes[0]))
-		}
-		err := os.WriteFile(outputName, src, 0o644)
-		if err != nil {
-			log.Fatalf("writing output: %s", err)
-		}
-	}
-
-	if len(types) > 0 {
-		log.Fatalf("no values defined for types: %s", strings.Join(types, ","))
-	}
-}
+const usage = `Usage of morestringer:
+	morestringer [flags] -type T [directory]
+	morestringer [flags] -type T files... # Must be a single package
+For more information, see:
+	https://github.com/friedelschoen/morestringer
+Flags:`
 
 // baseName that will put the generated code together with pkg.
 func baseName(pkg *Package, typename string) string {
@@ -170,9 +51,6 @@ func isDirectory(name string) bool {
 type File struct {
 	pkg  *Package  // Package to which this file belongs.
 	file *ast.File // Parsed AST.
-	// These fields are reset for each type being generated.
-	typeName string  // Name of the constant type.
-	values   []Value // Accumulator for constant values of that type.
 
 	trimPrefix  string
 	lineComment bool
@@ -192,17 +70,12 @@ type Package struct {
 // Returns all variants (such as tests) of the package.
 //
 // logf is a test logging hook. It can be nil when not testing.
-func loadPackages(
-	patterns, tags []string,
-	trimPrefix string, lineComment, cNames bool,
-	logf func(format string, args ...any),
-) []*Package {
+func loadPackages(patterns, tags []string, trimPrefix string, lineComment, cNames bool) []*Package {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedFiles,
 		// Tests are included, let the caller decide how to fold them in.
 		Tests:      true,
 		BuildFlags: []string{fmt.Sprintf("-tags=%s", strings.Join(tags, " "))},
-		Logf:       logf,
 	}
 	pkgs, err := packages.Load(cfg, patterns...)
 	if err != nil {
@@ -246,24 +119,64 @@ func loadPackages(
 	return out
 }
 
-func findValues(typeName string, pkg *Package) []Value {
-	values := make([]Value, 0, 100)
-	for _, file := range pkg.files {
-		// Set the state for this run of the walker.
-		file.typeName = typeName
-		file.values = nil
-		if file.file != nil {
-			ast.Inspect(file.file, file.genDecl)
-			values = append(values, file.values...)
-		}
+func memPackage(source string, trimPrefix string, lineComment, cNames bool) *Package {
+	fset := token.NewFileSet()
+	fileast, err := parser.ParseFile(fset, "testsource.go", source, parser.ParseComments)
+	if err != nil {
+		log.Fatalf("error: unable to parse package: %v", err)
 	}
-	return values
+
+	info := &types.Info{
+		Defs: make(map[*ast.Ident]types.Object),
+	}
+	conf := types.Config{Importer: importer.Default()}
+	pkg, err := conf.Check("p", fset, []*ast.File{fileast}, info)
+	if err != nil {
+		log.Fatalf("error: unable to check types: %v", err)
+	}
+
+	p := &Package{
+		name: pkg.Name(),
+		defs: info.Defs,
+	}
+
+	p.files = []*File{{
+		pkg:  p,
+		file: fileast,
+
+		trimPrefix:  trimPrefix,
+		lineComment: lineComment,
+		cNames:      cNames,
+	}}
+
+	return p
+}
+
+func (pkg *Package) findValues(typeNames ...string) map[string][]Value {
+	typeValues := make(map[string][]Value, len(typeNames))
+	for _, name := range typeNames {
+		typeValues[name] = nil
+	}
+
+	for _, file := range pkg.files {
+		ast.Inspect(file.file, func(node ast.Node) bool {
+			decl, ok := node.(*ast.GenDecl)
+			if !ok || decl.Tok != token.CONST {
+				// We only care about const declarations.
+				return true
+			}
+
+			file.genDecl(decl, typeValues)
+			return false
+		})
+	}
+	return typeValues
 }
 
 // Value represents a declared constant.
 type Value struct {
-	originalName string // The name of the constant.
-	name         string // The name with trimmed prefix.
+	original string // The name of the constant.
+	repr     string // The representing name.
 	// The value is stored as a bit pattern alone. The boolean tells us
 	// whether to interpret it as an int64 or a uint64; the only place
 	// this matters is when sorting.
@@ -276,20 +189,6 @@ type Value struct {
 
 func (v *Value) String() string {
 	return v.str
-}
-
-// byValue lets us sort the constants into increasing order.
-// We take care in the Less method to sort in signed or unsigned order,
-// as appropriate.
-type byValue []Value
-
-func (b byValue) Len() int      { return len(b) }
-func (b byValue) Swap(i, j int) { b[i], b[j] = b[j], b[i] }
-func (b byValue) Less(i, j int) bool {
-	if b[i].signed {
-		return int64(b[i].value) < int64(b[j].value)
-	}
-	return b[i].value < b[j].value
 }
 
 func unwrapParen(e ast.Expr) ast.Expr {
@@ -332,13 +231,32 @@ func valueExpr(vspec *ast.ValueSpec, ni int) ast.Expr {
 	return nil
 }
 
-// genDecl processes one declaration clause.
-func (f *File) genDecl(node ast.Node) bool {
-	decl, ok := node.(*ast.GenDecl)
-	if !ok || decl.Tok != token.CONST {
-		// We only care about const declarations.
-		return true
+func (f *File) createValue(name string, cval constant.Value, signed bool, expr ast.Expr, comment *ast.CommentGroup) Value {
+	v := Value{
+		original: name,
+		signed:   signed,
+		str:      cval.String(),
 	}
+	if i64, ok := constant.Int64Val(cval); ok {
+		v.value = uint64(i64)
+	} else if u64, ok := constant.Uint64Val(cval); ok {
+		v.value = u64
+	} else {
+		log.Fatalf("internal error: value of %s is not an integer: %s", name, cval.String())
+	}
+
+	if f.lineComment && comment != nil && len(comment.List) == 1 {
+		v.repr = strings.TrimSpace(comment.Text())
+	} else if cName := getCName(expr); f.cNames && cName != "" {
+		v.repr = strings.TrimPrefix(cName, f.trimPrefix)
+	} else {
+		v.repr = strings.TrimPrefix(v.original, f.trimPrefix)
+	}
+	return v
+}
+
+// genDecl processes one declaration clause.
+func (f *File) genDecl(decl *ast.GenDecl, typeValues map[string][]Value) {
 	// The name of the type of the constants we are declaring.
 	// Can change if this is a multi-element declaration.
 	typ := ""
@@ -376,8 +294,9 @@ func (f *File) genDecl(node ast.Node) bool {
 			}
 			typ = ident.Name
 		}
-		if typ != f.typeName {
-			// This is not the type we're looking for.
+		// check if this type is requested
+		values, ok := typeValues[typ]
+		if !ok {
 			continue
 		}
 		// We now have a list of names (from one line of source code) all being
@@ -402,33 +321,91 @@ func (f *File) genDecl(node ast.Node) bool {
 			if value.Kind() != constant.Int {
 				log.Fatalf("can't happen: constant is not an integer %s", name)
 			}
-			i64, isInt := constant.Int64Val(value)
-			u64, isUint := constant.Uint64Val(value)
-			if !isInt && !isUint {
-				log.Fatalf("internal error: value of %s is not an integer: %s", name, value.String())
-			}
-			if !isInt {
-				u64 = uint64(i64)
-			}
-			cName := ""
-			if f.cNames {
-				cName = getCName(valueExpr(vspec, ni))
-			}
-			v := Value{
-				originalName: name.Name,
-				value:        u64,
-				signed:       info&types.IsUnsigned == 0,
-				str:          value.String(),
-			}
-			if c := vspec.Comment; f.lineComment && c != nil && len(c.List) == 1 {
-				v.name = strings.TrimSpace(c.Text())
-			} else if cName != "" {
-				v.name = strings.TrimPrefix(cName, f.trimPrefix)
-			} else {
-				v.name = strings.TrimPrefix(v.originalName, f.trimPrefix)
-			}
-			f.values = append(f.values, v)
+			values = append(values, f.createValue(name.Name, value, info&types.IsUnsigned == 0, valueExpr(vspec, ni), vspec.Comment))
 		}
+		typeValues[typ] = values
 	}
-	return false
+}
+
+func main() {
+	log.SetFlags(0)
+	log.SetPrefix("stringer: ")
+
+	typeNames := flag.String("type", "", "comma-separated list of type names; must be set")
+	output := flag.String("output", "", "output file name; default srcdir/<type>_string.go")
+	trimprefix := flag.String("trimprefix", "", "trim the `prefix` from the generated constant names")
+	linecomment := flag.Bool("linecomment", false, "use line comment text as printed text when present")
+	buildTags := flag.String("tags", "", "comma-separated list of build tags to apply")
+	cNames := flag.Bool("cnames", false, "constant is defined as C.*, use the C-name")
+	genLookup := flag.String("lookup", "", "generate a lookup `function`, \"{}\" is replaced with type")
+	genJson := flag.Bool("json", false, "generate JSONUnmarshal and JSONMarshal methods")
+
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, usage)
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if len(*typeNames) == 0 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	types := strings.Split(*typeNames, ",")
+	var tags []string
+	if len(*buildTags) > 0 {
+		tags = strings.Split(*buildTags, ",")
+	}
+
+	// We accept either one directory or a list of files. Which do we have?
+	args := flag.Args()
+	if len(args) == 0 {
+		// Default: process whole package in current directory.
+		args = []string{"."}
+	}
+
+	// Parse the package once.
+	var dir string
+	// TODO(suzmue): accept other patterns for packages (directories, list of files, import paths, etc).
+	if len(args) == 1 && isDirectory(args[0]) {
+		dir = args[0]
+	} else {
+		if len(tags) != 0 {
+			log.Fatal("-tags option applies only to directories, not when files are specified")
+		}
+		dir = filepath.Dir(args[0])
+	}
+
+	// For each type, generate code in the first package where the type is declared.
+	// The order of packages is as follows:
+	// package x
+	// package x compiled for tests
+	// package x_test
+	//
+	// Each package pass could result in a separate generated file.
+	// These files must have the same package and test/not-test nature as the types
+	// from which they were generated.
+	//
+	// Types will be excluded when generated, to avoid repetitions.
+	pkgs := loadPackages(args, tags, *trimprefix, *linecomment, *cNames)
+	sort.Slice(pkgs, func(i, j int) bool {
+		// Put x_test packages last.
+		iTest := strings.HasSuffix(pkgs[i].name, "_test")
+		jTest := strings.HasSuffix(pkgs[j].name, "_test")
+		if iTest != jTest {
+			return !iTest
+		}
+
+		return len(pkgs[i].files) < len(pkgs[j].files)
+	})
+	g := Generator{
+		lookup: *genLookup,
+		json:   *genJson,
+	}
+	for _, pkg := range pkgs {
+		g.buf.Reset()
+		types = g.genPackage(pkg, types, dir, *output)
+	}
+
+	if len(types) > 0 {
+		log.Fatalf("no values defined for types: %s", strings.Join(types, ","))
+	}
 }

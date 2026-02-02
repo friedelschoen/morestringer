@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/friedelschoen/morestringer/internal/diffp"
 	"github.com/friedelschoen/morestringer/internal/testenv"
 )
 
@@ -1002,24 +1003,19 @@ func TestGolden(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			pkgs := loadPackages([]string{absFile}, nil, test.trimPrefix, test.lineComment, false, t.Logf)
-			if len(pkgs) != 1 {
-				t.Fatalf("got %d parsed packages but expected 1", len(pkgs))
-			}
+			pkg := memPackage(input, test.trimPrefix, test.lineComment, false)
+
 			// Extract the name and type of the constant from the first line.
 			tokens := strings.SplitN(test.input, " ", 3)
 			if len(tokens) != 3 {
 				t.Fatalf("%s: need type declaration on first line", test.name)
 			}
 
-			g := Generator{
-				pkg:  pkgs[0],
-				logf: t.Logf,
-			}
-			g.generate(tokens[1], findValues(tokens[1], pkgs[0]))
+			g := Generator{}
+			g.genType(tokens[1], pkg.findValues(tokens[1])[tokens[1]])
 			got := string(g.format())
 			if got != test.output {
-				t.Errorf("%s: got(%d)\n====\n%q====\nexpected(%d)\n====\n%q", test.name, len(got), got, len(test.output), test.output)
+				t.Errorf("file %s does not have the expected content:\n%s", test.name, diffp.Diff("want", []byte(test.output), "got", []byte(got)))
 			}
 		})
 	}
